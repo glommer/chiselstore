@@ -3,9 +3,11 @@
 use crate::rpc::proto::rpc_server::Rpc;
 use crate::{Consistency, StoreCommand, StoreServer, StoreTransport};
 use async_trait::async_trait;
+use async_mutex::Mutex;
 use derivative::Derivative;
 use little_raft::message::Message;
 use std::sync::Arc;
+use std::collections::HashMap;
 use tonic::{Request, Response, Status};
 
 #[allow(missing_docs)]
@@ -28,12 +30,30 @@ pub struct RpcTransport {
     /// Node address mapping function.
     #[derivative(Debug = "ignore")]
     node_addr: Box<NodeAddrFn>,
+    connections: Mutex<HashMap<String, Vec<RpcClient<tonic::transport::Channel>>>>,
 }
 
 impl RpcTransport {
     /// Creates a new RPC transport.
     pub fn new(node_addr: Box<NodeAddrFn>) -> Self {
-        RpcTransport { node_addr }
+        RpcTransport { node_addr, connections: Default::default() }
+    }
+
+    async fn connection<S: ToString>(&self, addr: S) -> RpcClient<tonic::transport::Channel> {
+        let mut conns = self.connections.lock().await;
+        let addr = addr.to_string();
+        let map = conns.entry(addr.clone()).or_insert_with(Vec::new);
+        match map.pop() {
+            Some(x) => x,
+            None => RpcClient::connect(addr).await.unwrap(),
+        }
+    }
+
+    async fn replenish<S: ToString>(&self, addr: S, conn: RpcClient<tonic::transport::Channel>) {
+        let mut conns = self.connections.lock().await;
+        let addr = addr.to_string();
+        let map = conns.entry(addr).or_insert_with(Vec::new);
+        map.push(conn);
     }
 }
 
@@ -168,7 +188,7 @@ impl StoreTransport for RpcTransport {
         consistency: Consistency,
     ) -> Result<crate::server::QueryResults, crate::StoreError> {
         let addr = (self.node_addr)(to_id);
-        let mut client = RpcClient::connect(addr).await.unwrap();
+        let mut client = self.connection(addr.clone()).await;
         let query = tonic::Request::new(Query {
             sql,
             consistency: consistency as i32,
@@ -179,6 +199,7 @@ impl StoreTransport for RpcTransport {
         for row in response.rows {
             rows.push(crate::server::QueryRow { values: row.values });
         }
+        self.replenish(addr, client).await;
         Ok(crate::server::QueryResults { rows })
     }
 }
