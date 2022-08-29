@@ -24,3 +24,5 @@ tonic-build = "0.5.2"
 [dev-dependencies]
 anyhow = { version = "1.0.45", features = ["backtrace"] }
 structopt = "0.3.25"
+yaml-rust = "0.4.5"
+url = "2.2.2"
