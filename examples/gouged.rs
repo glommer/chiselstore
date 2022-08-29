@@ -1,12 +1,16 @@
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use chiselstore::rpc::proto::rpc_server::RpcServer;
 use chiselstore::{
     rpc::{RpcService, RpcTransport},
     StoreServer,
 };
+use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::sync::Arc;
 use structopt::StructOpt;
+use tokio::fs;
 use tonic::transport::Server;
+use url::Url;
+use yaml_rust::YamlLoader;
 
 #[derive(StructOpt, Debug)]
 #[structopt(name = "gouged")]
@@ -14,31 +18,52 @@ struct Opt {
     /// The ID of this server.
     #[structopt(short, long)]
     id: usize,
-    /// The IDs of peers.
-    #[structopt(short, long, required = false)]
-    peers: Vec<usize>,
-}
 
-/// Node authority (host and port) in the cluster.
-fn node_authority(id: usize) -> (&'static str, u16) {
-    let host = "127.0.0.1";
-    let port = 50000 + (id as u16);
-    (host, port)
-}
-
-/// Node RPC address in cluster.
-fn node_rpc_addr(id: usize) -> String {
-    let (host, port) = node_authority(id);
-    format!("http://{}:{}", host, port)
+    #[structopt(short, long, default_value = ".conf.yaml")]
+    conf: String,
 }
 
 #[tokio::main]
 async fn main() -> Result<()> {
     let opt = Opt::from_args();
-    let (host, port) = node_authority(opt.id);
-    let rpc_listen_addr = format!("{}:{}", host, port).parse().unwrap();
-    let transport = RpcTransport::new(Box::new(node_rpc_addr));
-    let server = StoreServer::start(opt.id, opt.peers, transport)?;
+    let s = fs::read_to_string(&opt.conf).await?;
+    let docs = YamlLoader::load_from_str(&s).unwrap();
+    let doc = &docs[0];
+    let nodes = doc
+        .as_vec()
+        .ok_or_else(|| anyhow!("malformed yaml: not an array: {:?}", doc))?;
+    let mut peers = vec![];
+    let mut all_nodes: Vec<String> = vec![];
+    let mut my_port = None;
+
+    for (id, node) in nodes.iter().enumerate() {
+        let id = id + 1;
+        let rpc_str = node
+            .as_str()
+            .ok_or_else(|| anyhow!("{:?} is not a string", node))?;
+        let me_rpc = Url::parse(rpc_str)?;
+        if id != opt.id {
+            peers.push(id)
+        } else {
+            my_port = me_rpc.port().clone()
+        }
+        all_nodes.push(me_rpc.to_string());
+    }
+
+    let all_nodes = Arc::new(all_nodes);
+    let node_rpc_addr = Box::new(move |id: usize| -> String {
+        assert!(id >= 1);
+        let peer = id - 1;
+        all_nodes[peer].clone()
+    });
+
+    let rpc_port =
+        my_port.ok_or_else(|| anyhow!("no port found. Am I (id:{}) on the node list?", opt.id))?;
+
+    let rpc_listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), rpc_port);
+
+    let transport = RpcTransport::new(node_rpc_addr);
+    let server = StoreServer::start(opt.id, peers, transport)?;
     let server = Arc::new(server);
     let f = {
         let server = server.clone();
