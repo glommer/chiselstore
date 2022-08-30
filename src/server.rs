@@ -185,6 +185,7 @@ impl<T: StoreTransport + Send + Sync> StateMachine<StoreCommand> for Store<T> {
 impl<T: StoreTransport + Send + Sync> Cluster<StoreCommand> for Store<T> {
     fn register_leader(&mut self, leader_id: Option<ReplicaID>) {
         if let Some(id) = leader_id {
+            println!("{} is the leader.", id);
             self.leader = Some(id);
             self.leader_exists.store(true, Ordering::SeqCst);
         } else {
