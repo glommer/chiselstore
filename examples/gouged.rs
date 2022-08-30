@@ -1,4 +1,4 @@
-use anyhow::{anyhow, Result};
+use anyhow::{anyhow, Context, Result};
 use chiselstore::rpc::proto::rpc_server::RpcServer;
 use chiselstore::{
     rpc::{RpcService, RpcTransport},
@@ -15,10 +15,6 @@ use yaml_rust::YamlLoader;
 #[derive(StructOpt, Debug)]
 #[structopt(name = "gouged")]
 struct Opt {
-    /// The ID of this server.
-    #[structopt(short, long)]
-    id: usize,
-
     #[structopt(short, long, default_value = ".conf.yaml")]
     conf: String,
 }
@@ -35,19 +31,28 @@ async fn main() -> Result<()> {
     let mut peers = vec![];
     let mut all_nodes: Vec<String> = vec![];
     let mut my_port = None;
+    let mut my_id = 0;
+
+    let me = Url::parse(
+        &std::env::var("CHISELSTORE_ADDR")
+            .with_context(|| "reading CHISELSTORE_ADDR")
+            .unwrap(),
+    )?;
 
     for (id, node) in nodes.iter().enumerate() {
         let id = id + 1;
         let rpc_str = node
             .as_str()
             .ok_or_else(|| anyhow!("{:?} is not a string", node))?;
-        let me_rpc = Url::parse(rpc_str)?;
-        if id != opt.id {
+
+        let rpc = Url::parse(rpc_str)?;
+        if me != rpc {
             peers.push(id)
         } else {
-            my_port = me_rpc.port().clone()
+            my_id = id;
+            my_port = rpc.port().clone()
         }
-        all_nodes.push(me_rpc.to_string());
+        all_nodes.push(rpc.to_string());
     }
 
     let all_nodes = Arc::new(all_nodes);
@@ -57,13 +62,14 @@ async fn main() -> Result<()> {
         all_nodes[peer].clone()
     });
 
-    let rpc_port =
-        my_port.ok_or_else(|| anyhow!("no port found. Am I (id:{}) on the node list?", opt.id))?;
+    let rpc_port = my_port
+        .ok_or_else(|| anyhow!("no port found. Am I ({:?}) on the node list?", me.as_str()))?;
+    assert_ne!(my_id, 0);
 
     let rpc_listen_addr = SocketAddr::new(IpAddr::V4(Ipv4Addr::new(0, 0, 0, 0)), rpc_port);
 
     let transport = RpcTransport::new(node_rpc_addr);
-    let server = StoreServer::start(opt.id, peers, transport)?;
+    let server = StoreServer::start(my_id, peers, transport)?;
     let server = Arc::new(server);
     let f = {
         let server = server.clone();
